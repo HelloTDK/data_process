@@ -28,7 +28,7 @@ def split_train_val_floder(img_dir, output_dir, ratio=0.9):
     print(f"训练集和验证集已保存到: {output_dir}")  
 
 if __name__ == '__main__':
-    img_dir = r'D:\Data\car_plate\plate_recong\git_plate\merge7.11'
+    img_dir = r'D:\Desktop\split\merge'
     output_dir = os.path.dirname(img_dir)
     output_dir = os.path.join(output_dir, 'train_val_split')
     split_train_val_floder(img_dir, output_dir)
