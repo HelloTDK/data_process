@@ -2,6 +2,7 @@ import os
 import shutil
 import random
 import glob
+from datetime import datetime
 
 def split_train_val_floder(img_dir, output_dir, ratio=0.9):
     image_extensions = ['jpg', 'jpeg', 'png', 'bmp', 'tiff', 'webp']
@@ -27,10 +28,20 @@ def split_train_val_floder(img_dir, output_dir, ratio=0.9):
 
     print(f"训练集和验证集已保存到: {output_dir}")  
 
+
+def get_date():
+    now = datetime.now()
+    year = now.year
+    month = now.month
+    day = now.day
+    return year,month,day
+
 if __name__ == '__main__':
-    img_dir = r'D:\Desktop\split\merge'
+    img_dir = '/expdata/givap/data/plate_recong/merge/b3_2025_8_5'
+    dirname = os.path.basename(img_dir)
     output_dir = os.path.dirname(img_dir)
-    output_dir = os.path.join(output_dir, 'train_val_split')
+    year,month,day = get_date()
+    output_dir = os.path.join(output_dir, f'train_val_split_{dirname}_{year}{month}{day}')
     split_train_val_floder(img_dir, output_dir)
 
     

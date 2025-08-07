@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-YOLO数据增强工具启动脚本
+多格式数据增强工具启动脚本
+支持YOLO、LabelImg XML、LabelMe JSON格式
 检查依赖并启动应用程序
 """
 
@@ -27,9 +28,10 @@ def install_requirements():
 
 def main():
     """主函数"""
-    print("=" * 50)
-    print("YOLO数据增强工具启动器")
-    print("=" * 50)
+    print("=" * 60)
+    print("多格式数据增强工具启动器")
+    print("支持YOLO、LabelImg XML、LabelMe JSON格式")
+    print("=" * 60)
     
     # 检查Python版本
     if sys.version_info < (3, 7):
@@ -78,8 +80,8 @@ def main():
         print("错误: 找不到主程序文件 yolo_augmenter.py")
         sys.exit(1)
     
-    print("正在启动YOLO数据增强工具...")
-    print("-" * 50)
+    print("正在启动多格式数据增强工具...")
+    print("-" * 60)
     
     # 启动主程序
     try:

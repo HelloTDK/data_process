@@ -48,7 +48,7 @@ def split_trainval(img_dir, output_dir, ratio=0.8):
 
 
 if __name__ == '__main__':
-    img_dir = r'D:\Data\car_plate\plate_recong\git_plate\git_plate\images'
+    img_dir = r'/expdata/givap/dataset/train_data/plate_ocr5/images'
     output_dir = os.path.dirname(img_dir)
     print(f"输出目录: {output_dir}")
     split_trainval(img_dir, output_dir)
