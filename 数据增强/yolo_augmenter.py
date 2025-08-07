@@ -2,12 +2,13 @@ import sys
 import os
 import json
 import shutil
+import base64
+import xml.etree.ElementTree as ET
 from pathlib import Path
 import cv2
 import numpy as np
 from PIL import Image
 import albumentations as A
-import xml.etree.ElementTree as ET
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QGridLayout, QPushButton, QLabel, 
                              QLineEdit, QFileDialog, QProgressBar, QCheckBox,
@@ -16,34 +17,12 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui import QPixmap, QFont
 
-class YOLOAugmenter:
-    """多格式数据增强核心类 - 支持YOLO、LabelImg XML、LabelMe JSON"""
+class DataAugmenter:
+    """数据增强核心类，支持YOLO、LabelMe和XML格式"""
     
     def __init__(self):
         self.image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
-        self.annotation_formats = {
-            'yolo': {'ext': '.txt', 'name': 'YOLO格式'},
-            'labelimg': {'ext': '.xml', 'name': 'LabelImg XML格式'},
-            'labelme': {'ext': '.json', 'name': 'LabelMe JSON格式'}
-        }
         
-    def load_annotation(self, annotation_path, image_width=None, image_height=None):
-        """加载标注文件 - 自动检测格式"""
-        if not os.path.exists(annotation_path):
-            return []
-        
-        ext = Path(annotation_path).suffix.lower()
-        
-        if ext == '.txt':
-            return self.load_yolo_annotation(annotation_path)
-        elif ext == '.xml':
-            return self.load_labelimg_annotation(annotation_path, image_width, image_height)
-        elif ext == '.json':
-            return self.load_labelme_annotation(annotation_path, image_width, image_height)
-        else:
-            print(f"不支持的标注格式: {ext}")
-            return []
-    
     def load_yolo_annotation(self, annotation_path):
         """加载YOLO格式标注文件"""
         if not os.path.exists(annotation_path):
@@ -66,10 +45,46 @@ class YOLOAugmenter:
                             height = float(parts[4])
                             bboxes.append([x_center, y_center, width, height, class_id])
         except Exception as e:
-            print(f"读取YOLO标签文件失败 {annotation_path}: {e}")
+            print(f"读取标签文件失败 {annotation_path}: {e}")
         return bboxes
     
-    def load_labelimg_annotation(self, annotation_path, image_width, image_height):
+    def load_labelme_annotation(self, annotation_path, img_width, img_height):
+        """加载LabelMe格式标注文件"""
+        if not os.path.exists(annotation_path):
+            return []
+        
+        bboxes = []
+        try:
+            with open(annotation_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                
+            for shape in data.get('shapes', []):
+                if shape['shape_type'] == 'rectangle':
+                    points = shape['points']
+                    x1, y1 = points[0]
+                    x2, y2 = points[1]
+                    
+                    # 确保坐标顺序正确
+                    x_min = min(x1, x2)
+                    x_max = max(x1, x2)
+                    y_min = min(y1, y2)
+                    y_max = max(y1, y2)
+                    
+                    # 转换为YOLO格式 (归一化的中心点坐标和宽高)
+                    x_center = (x_min + x_max) / 2.0 / img_width
+                    y_center = (y_min + y_max) / 2.0 / img_height
+                    width = (x_max - x_min) / img_width
+                    height = (y_max - y_min) / img_height
+                    
+                    # 使用标签名作为类别
+                    label = shape['label']
+                    bboxes.append([x_center, y_center, width, height, label])
+                    
+        except Exception as e:
+            print(f"读取LabelMe标签文件失败 {annotation_path}: {e}")
+        return bboxes
+    
+    def load_xml_annotation(self, annotation_path, img_width, img_height):
         """加载LabelImg XML格式标注文件"""
         if not os.path.exists(annotation_path):
             return []
@@ -83,67 +98,22 @@ class YOLOAugmenter:
                 name = obj.find('name').text
                 bbox = obj.find('bndbox')
                 
-                xmin = int(bbox.find('xmin').text)
-                ymin = int(bbox.find('ymin').text)
-                xmax = int(bbox.find('xmax').text)
-                ymax = int(bbox.find('ymax').text)
+                xmin = float(bbox.find('xmin').text)
+                ymin = float(bbox.find('ymin').text)
+                xmax = float(bbox.find('xmax').text)
+                ymax = float(bbox.find('ymax').text)
                 
                 # 转换为YOLO格式 (归一化的中心点坐标和宽高)
-                x_center = (xmin + xmax) / 2.0 / image_width
-                y_center = (ymin + ymax) / 2.0 / image_height
-                width = (xmax - xmin) / image_width
-                height = (ymax - ymin) / image_height
+                x_center = (xmin + xmax) / 2.0 / img_width
+                y_center = (ymin + ymax) / 2.0 / img_height
+                width = (xmax - xmin) / img_width
+                height = (ymax - ymin) / img_height
                 
-                # 使用类名作为类ID (可以后续映射到数字)
                 bboxes.append([x_center, y_center, width, height, name])
                 
         except Exception as e:
-            print(f"读取LabelImg XML标签文件失败 {annotation_path}: {e}")
+            print(f"读取XML标签文件失败 {annotation_path}: {e}")
         return bboxes
-    
-    def load_labelme_annotation(self, annotation_path, image_width, image_height):
-        """加载LabelMe JSON格式标注文件"""
-        if not os.path.exists(annotation_path):
-            return []
-        
-        bboxes = []
-        try:
-            with open(annotation_path, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            for shape in data.get('shapes', []):
-                if shape['shape_type'] == 'rectangle':
-                    points = shape['points']
-                    label = shape['label']
-                    
-                    # 获取矩形的两个对角点
-                    x1, y1 = points[0]
-                    x2, y2 = points[1]
-                    
-                    # 确保坐标顺序正确
-                    xmin, xmax = min(x1, x2), max(x1, x2)
-                    ymin, ymax = min(y1, y2), max(y1, y2)
-                    
-                    # 转换为YOLO格式
-                    x_center = (xmin + xmax) / 2.0 / image_width
-                    y_center = (ymin + ymax) / 2.0 / image_height
-                    width = (xmax - xmin) / image_width
-                    height = (ymax - ymin) / image_height
-                    
-                    bboxes.append([x_center, y_center, width, height, label])
-                    
-        except Exception as e:
-            print(f"读取LabelMe JSON标签文件失败 {annotation_path}: {e}")
-        return bboxes
-    
-    def save_annotation(self, bboxes, annotation_path, format_type, image_width=None, image_height=None, image_filename=None):
-        """保存标注文件 - 根据格式类型"""
-        if format_type == 'yolo':
-            self.save_yolo_annotation(bboxes, annotation_path)
-        elif format_type == 'labelimg':
-            self.save_labelimg_annotation(bboxes, annotation_path, image_width, image_height, image_filename)
-        elif format_type == 'labelme':
-            self.save_labelme_annotation(bboxes, annotation_path, image_width, image_height, image_filename)
     
     def save_yolo_annotation(self, bboxes, annotation_path):
         """保存YOLO格式标注文件"""
@@ -154,9 +124,55 @@ class YOLOAugmenter:
                     x_center, y_center, width, height, class_id = bbox
                     f.write(f"{class_id} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}\n")
         except Exception as e:
-            print(f"保存YOLO标签文件失败 {annotation_path}: {e}")
+            print(f"保存标签文件失败 {annotation_path}: {e}")
     
-    def save_labelimg_annotation(self, bboxes, annotation_path, image_width, image_height, image_filename):
+    def save_labelme_annotation(self, bboxes, annotation_path, img_width, img_height, image_path):
+        """保存LabelMe格式标注文件"""
+        try:
+            # 读取图片的base64编码
+            with open(image_path, 'rb') as f:
+                image_data = f.read()
+            image_base64 = base64.b64encode(image_data).decode('utf-8')
+            
+            # 创建LabelMe格式数据
+            labelme_data = {
+                "version": "5.4.1",
+                "flags": {},
+                "shapes": [],
+                "imagePath": os.path.basename(image_path),
+                "imageData": image_base64,
+                "imageHeight": img_height,
+                "imageWidth": img_width
+            }
+            
+            # 转换边界框
+            for bbox in bboxes:
+                x_center, y_center, width, height, label = bbox
+                
+                # 从YOLO格式转回像素坐标
+                x_min = (x_center - width / 2) * img_width
+                x_max = (x_center + width / 2) * img_width
+                y_min = (y_center - height / 2) * img_height
+                y_max = (y_center + height / 2) * img_height
+                
+                shape = {
+                    "label": str(label),
+                    "points": [[x_min, y_min], [x_max, y_max]],
+                    "group_id": None,
+                    "description": "",
+                    "shape_type": "rectangle",
+                    "flags": {}
+                }
+                labelme_data["shapes"].append(shape)
+            
+            # 保存JSON文件
+            with open(annotation_path, 'w', encoding='utf-8') as f:
+                json.dump(labelme_data, f, ensure_ascii=False, indent=2)
+                
+        except Exception as e:
+            print(f"保存LabelMe标签文件失败 {annotation_path}: {e}")
+    
+    def save_xml_annotation(self, bboxes, annotation_path, img_width, img_height, image_path):
         """保存LabelImg XML格式标注文件"""
         try:
             # 创建XML根元素
@@ -164,17 +180,17 @@ class YOLOAugmenter:
             
             # 添加文件夹信息
             folder = ET.SubElement(annotation, 'folder')
-            folder.text = 'images'
+            folder.text = os.path.dirname(image_path)
             
-            # 添加文件名
+            # 添加文件名信息
             filename = ET.SubElement(annotation, 'filename')
-            filename.text = image_filename
+            filename.text = os.path.basename(image_path)
             
-            # 添加路径
+            # 添加路径信息
             path = ET.SubElement(annotation, 'path')
-            path.text = image_filename
+            path.text = image_path
             
-            # 添加源信息
+            # 添加数据源信息
             source = ET.SubElement(annotation, 'source')
             database = ET.SubElement(source, 'database')
             database.text = 'Unknown'
@@ -182,11 +198,11 @@ class YOLOAugmenter:
             # 添加图片尺寸信息
             size = ET.SubElement(annotation, 'size')
             width_elem = ET.SubElement(size, 'width')
-            width_elem.text = str(image_width)
+            width_elem.text = str(img_width)
             height_elem = ET.SubElement(size, 'height')
-            height_elem.text = str(image_height)
-            depth = ET.SubElement(size, 'depth')
-            depth.text = '3'
+            height_elem.text = str(img_height)
+            depth_elem = ET.SubElement(size, 'depth')
+            depth_elem.text = '3'
             
             # 添加分割信息
             segmented = ET.SubElement(annotation, 'segmented')
@@ -194,18 +210,24 @@ class YOLOAugmenter:
             
             # 添加对象信息
             for bbox in bboxes:
-                x_center, y_center, width, height, class_name = bbox
+                x_center, y_center, width, height, label = bbox
                 
-                # 转换回像素坐标
-                xmin = int((x_center - width/2) * image_width)
-                ymin = int((y_center - height/2) * image_height)
-                xmax = int((x_center + width/2) * image_width)
-                ymax = int((y_center + height/2) * image_height)
+                # 从YOLO格式转回像素坐标
+                x_min = int((x_center - width / 2) * img_width)
+                x_max = int((x_center + width / 2) * img_width)
+                y_min = int((y_center - height / 2) * img_height)
+                y_max = int((y_center + height / 2) * img_height)
+                
+                # 确保坐标在图片范围内
+                x_min = max(0, min(x_min, img_width - 1))
+                x_max = max(0, min(x_max, img_width - 1))
+                y_min = max(0, min(y_min, img_height - 1))
+                y_max = max(0, min(y_max, img_height - 1))
                 
                 obj = ET.SubElement(annotation, 'object')
                 
                 name = ET.SubElement(obj, 'name')
-                name.text = str(class_name)
+                name.text = str(label)
                 
                 pose = ET.SubElement(obj, 'pose')
                 pose.text = 'Unspecified'
@@ -218,57 +240,37 @@ class YOLOAugmenter:
                 
                 bndbox = ET.SubElement(obj, 'bndbox')
                 xmin_elem = ET.SubElement(bndbox, 'xmin')
-                xmin_elem.text = str(xmin)
+                xmin_elem.text = str(x_min)
                 ymin_elem = ET.SubElement(bndbox, 'ymin')
-                ymin_elem.text = str(ymin)
+                ymin_elem.text = str(y_min)
                 xmax_elem = ET.SubElement(bndbox, 'xmax')
-                xmax_elem.text = str(xmax)
+                xmax_elem.text = str(x_max)
                 ymax_elem = ET.SubElement(bndbox, 'ymax')
-                ymax_elem.text = str(ymax)
+                ymax_elem.text = str(y_max)
             
-            # 保存XML文件
+            # 格式化XML并保存
+            self._prettify_xml(annotation)
             tree = ET.ElementTree(annotation)
             tree.write(annotation_path, encoding='utf-8', xml_declaration=True)
             
         except Exception as e:
-            print(f"保存LabelImg XML标签文件失败 {annotation_path}: {e}")
+            print(f"保存XML标签文件失败 {annotation_path}: {e}")
     
-    def save_labelme_annotation(self, bboxes, annotation_path, image_width, image_height, image_filename):
-        """保存LabelMe JSON格式标注文件"""
-        try:
-            data = {
-                "version": "4.5.6",
-                "flags": {},
-                "shapes": [],
-                "imagePath": image_filename,
-                "imageData": None,
-                "imageHeight": image_height,
-                "imageWidth": image_width
-            }
-            
-            for bbox in bboxes:
-                x_center, y_center, width, height, label = bbox
-                
-                # 转换回像素坐标
-                xmin = (x_center - width/2) * image_width
-                ymin = (y_center - height/2) * image_height
-                xmax = (x_center + width/2) * image_width
-                ymax = (y_center + height/2) * image_height
-                
-                shape = {
-                    "label": str(label),
-                    "points": [[xmin, ymin], [xmax, ymax]],
-                    "group_id": None,
-                    "shape_type": "rectangle",
-                    "flags": {}
-                }
-                data["shapes"].append(shape)
-            
-            with open(annotation_path, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-                
-        except Exception as e:
-            print(f"保存LabelMe JSON标签文件失败 {annotation_path}: {e}")
+    def _prettify_xml(self, elem, level=0):
+        """格式化XML，使其更易读"""
+        indent = "\n" + level * "  "
+        if len(elem):
+            if not elem.text or not elem.text.strip():
+                elem.text = indent + "  "
+            if not elem.tail or not elem.tail.strip():
+                elem.tail = indent
+            for child in elem:
+                self._prettify_xml(child, level + 1)
+            if not child.tail or not child.tail.strip():
+                child.tail = indent
+        else:
+            if level and (not elem.tail or not elem.tail.strip()):
+                elem.tail = indent
     
     def create_augmentation_pipeline(self, aug_params):
         """创建数据增强管道"""
@@ -361,29 +363,6 @@ class YOLOAugmenter:
             label_fields=['class_labels']
         ))
     
-    def detect_annotation_format(self, input_dir):
-        """检测标注文件格式"""
-        formats_found = {'yolo': 0, 'labelimg': 0, 'labelme': 0}
-        
-        # 检查可能的标注目录
-        possible_dirs = [input_dir, os.path.join(input_dir, "labels"), os.path.join(input_dir, "annotations")]
-        
-        for check_dir in possible_dirs:
-            if os.path.exists(check_dir):
-                for file in os.listdir(check_dir):
-                    ext = Path(file).suffix.lower()
-                    if ext == '.txt':
-                        formats_found['yolo'] += 1
-                    elif ext == '.xml':
-                        formats_found['labelimg'] += 1
-                    elif ext == '.json':
-                        formats_found['labelme'] += 1
-        
-        # 返回最多的格式
-        if max(formats_found.values()) == 0:
-            return None
-        return max(formats_found, key=formats_found.get)
-    
     def cv2_imread_unicode(self, file_path):
         """支持中文路径的图片读取"""
         try:
@@ -411,7 +390,7 @@ class YOLOAugmenter:
             print(f"保存图片失败: {e}")
             return False
 
-    def augment_image_and_labels(self, image_path, annotation_path, aug_pipeline, output_dir, multiplier, annotation_format='yolo'):
+    def augment_image_and_labels(self, image_path, annotation_path, aug_pipeline, output_dir, multiplier, format_type='yolo'):
         """对单张图片和标签进行增强"""
         # 加载图片 - 支持中文路径
         image = self.cv2_imread_unicode(image_path)
@@ -419,10 +398,15 @@ class YOLOAugmenter:
             return False, f"无法加载图片: {image_path}"
         
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-        image_height, image_width = image.shape[:2]
+        img_height, img_width = image.shape[:2]
         
-        # 加载标注 - 根据格式
-        bboxes = self.load_annotation(annotation_path, image_width, image_height)
+        # 根据格式加载标注
+        if format_type == 'labelme':
+            bboxes = self.load_labelme_annotation(annotation_path, img_width, img_height)
+        elif format_type == 'xml':
+            bboxes = self.load_xml_annotation(annotation_path, img_width, img_height)
+        else:
+            bboxes = self.load_yolo_annotation(annotation_path)
         
         # 获取文件名
         image_name = Path(image_path).stem
@@ -459,16 +443,14 @@ class YOLOAugmenter:
                     new_bboxes = []
                 
                 # 创建输出目录结构
-                output_images_dir = os.path.join(output_dir, "images")
-                if annotation_format == 'yolo':
+                if format_type in ['labelme', 'xml']:
+                    output_images_dir = output_dir
+                    output_labels_dir = output_dir
+                else:
+                    output_images_dir = os.path.join(output_dir, "images")
                     output_labels_dir = os.path.join(output_dir, "labels")
-                elif annotation_format == 'labelimg':
-                    output_labels_dir = os.path.join(output_dir, "annotations")
-                else:  # labelme
-                    output_labels_dir = os.path.join(output_dir, "annotations")
-                    
-                os.makedirs(output_images_dir, exist_ok=True)
-                os.makedirs(output_labels_dir, exist_ok=True)
+                    os.makedirs(output_images_dir, exist_ok=True)
+                    os.makedirs(output_labels_dir, exist_ok=True)
                 
                 # 保存增强后的图片
                 output_image_name = f"{image_name}_aug_{i+1}{image_ext}"
@@ -481,27 +463,19 @@ class YOLOAugmenter:
                 
                 # 保存增强后的标注
                 if new_bboxes:
-                    # 根据格式确定文件扩展名
-                    if annotation_format == 'yolo':
-                        output_annotation_name = f"{image_name}_aug_{i+1}.txt"
-                    elif annotation_format == 'labelimg':
-                        output_annotation_name = f"{image_name}_aug_{i+1}.xml"
-                    else:  # labelme
-                        output_annotation_name = f"{image_name}_aug_{i+1}.json"
-                    
-                    output_annotation_path = os.path.join(output_labels_dir, output_annotation_name)
-                    
-                    # 获取增强后图片的尺寸
                     aug_height, aug_width = aug_image.shape[:2]
-                    
-                    self.save_annotation(
-                        new_bboxes, 
-                        output_annotation_path, 
-                        annotation_format,
-                        aug_width, 
-                        aug_height, 
-                        output_image_name
-                    )
+                    if format_type == 'labelme':
+                        output_annotation_name = f"{image_name}_aug_{i+1}.json"
+                        output_annotation_path = os.path.join(output_labels_dir, output_annotation_name)
+                        self.save_labelme_annotation(new_bboxes, output_annotation_path, aug_width, aug_height, output_image_path)
+                    elif format_type == 'xml':
+                        output_annotation_name = f"{image_name}_aug_{i+1}.xml"
+                        output_annotation_path = os.path.join(output_labels_dir, output_annotation_name)
+                        self.save_xml_annotation(new_bboxes, output_annotation_path, aug_width, aug_height, output_image_path)
+                    else:
+                        output_annotation_name = f"{image_name}_aug_{i+1}.txt"
+                        output_annotation_path = os.path.join(output_labels_dir, output_annotation_name)
+                        self.save_yolo_annotation(new_bboxes, output_annotation_path)
                 
                 results.append((output_image_path, len(new_bboxes)))
                 
@@ -519,57 +493,54 @@ class AugmentationWorker(QThread):
     error_occurred = pyqtSignal(str)
     stats_updated = pyqtSignal(str)  # 新增统计信号
     
-    def __init__(self, input_dir, output_dir, aug_params, multiplier, annotation_format='yolo'):
+    def __init__(self, input_dir, output_dir, aug_params, multiplier, format_type='yolo'):
         super().__init__()
         self.input_dir = input_dir
         self.output_dir = output_dir
         self.aug_params = aug_params
         self.multiplier = multiplier
-        self.annotation_format = annotation_format
-        self.augmenter = YOLOAugmenter()
+        self.format_type = format_type
+        self.augmenter = DataAugmenter()
         
     def run(self):
         try:
             # 创建输出目录
             os.makedirs(self.output_dir, exist_ok=True)
             
-            # 自动检测标注格式（如果未指定）
-            if self.annotation_format == 'auto':
-                detected_format = self.augmenter.detect_annotation_format(self.input_dir)
-                if detected_format:
-                    self.annotation_format = detected_format
-                    self.status_updated.emit(f"自动检测到标注格式: {self.augmenter.annotation_formats[detected_format]['name']}")
-                else:
-                    self.annotation_format = 'yolo'  # 默认使用YOLO格式
-                    self.status_updated.emit("未检测到标注文件，使用默认YOLO格式")
-            
-            # 检查输入目录结构
-            images_dir = os.path.join(self.input_dir, "images")
-            
-            # 根据标注格式确定标注目录
-            if self.annotation_format == 'yolo':
-                labels_dir = os.path.join(self.input_dir, "labels")
-            else:  # labelimg 或 labelme
-                labels_dir = os.path.join(self.input_dir, "annotations")
-                # 如果没有annotations目录，也检查根目录
-                if not os.path.exists(labels_dir):
-                    labels_dir = self.input_dir
-            
-            # 获取所有图片文件
-            image_files = []
-            
-            if os.path.exists(images_dir):
-                # 如果存在images目录，从该目录读取图片
-                self.status_updated.emit("检测到images目录，从中读取图片文件...")
-                for ext in self.augmenter.image_extensions:
-                    image_files.extend(Path(images_dir).glob(f"*{ext}"))
-                    image_files.extend(Path(images_dir).glob(f"*{ext.upper()}"))
-            else:
-                # 否则从根目录读取图片
-                self.status_updated.emit("从根目录读取图片文件...")
+            # 根据格式类型检查输入目录结构
+            if self.format_type == 'labelme':
+                # LabelMe格式：图片和JSON文件在同一目录
+                self.status_updated.emit("LabelMe格式：从根目录读取图片和JSON文件...")
+                image_files = []
                 for ext in self.augmenter.image_extensions:
                     image_files.extend(Path(self.input_dir).glob(f"*{ext}"))
                     image_files.extend(Path(self.input_dir).glob(f"*{ext.upper()}"))
+            elif self.format_type == 'xml':
+                # XML格式：图片和XML文件在同一目录
+                self.status_updated.emit("XML格式：从根目录读取图片和XML文件...")
+                image_files = []
+                for ext in self.augmenter.image_extensions:
+                    image_files.extend(Path(self.input_dir).glob(f"*{ext}"))
+                    image_files.extend(Path(self.input_dir).glob(f"*{ext.upper()}"))
+            else:
+                # YOLO格式：检查images和labels目录
+                images_dir = os.path.join(self.input_dir, "images")
+                labels_dir = os.path.join(self.input_dir, "labels")
+                
+                image_files = []
+                
+                if os.path.exists(images_dir):
+                    # 如果存在images目录，从该目录读取图片
+                    self.status_updated.emit("检测到images目录，从中读取图片文件...")
+                    for ext in self.augmenter.image_extensions:
+                        image_files.extend(Path(images_dir).glob(f"*{ext}"))
+                        image_files.extend(Path(images_dir).glob(f"*{ext.upper()}"))
+                else:
+                    # 否则从根目录读取图片
+                    self.status_updated.emit("从根目录读取图片文件...")
+                    for ext in self.augmenter.image_extensions:
+                        image_files.extend(Path(self.input_dir).glob(f"*{ext}"))
+                        image_files.extend(Path(self.input_dir).glob(f"*{ext.upper()}"))
             
             if not image_files:
                 self.error_occurred.emit("输入目录中没有找到图片文件")
@@ -581,7 +552,7 @@ class AugmentationWorker(QThread):
             files_with_labels = 0
             files_without_labels = 0
             
-            self.status_updated.emit(f"找到 {total_files} 张图片，增强倍数: {self.multiplier}")
+            self.status_updated.emit(f"找到 {total_files} 张图片，增强倍数: {self.multiplier}，格式: {self.format_type.upper()}")
             
             # 创建增强管道
             aug_pipeline = self.augmenter.create_augmentation_pipeline(self.aug_params)
@@ -589,16 +560,24 @@ class AugmentationWorker(QThread):
             for image_file in image_files:
                 image_path = str(image_file)
                 
-                # 根据标注格式和目录结构确定标签文件路径
-                annotation_ext = self.augmenter.annotation_formats[self.annotation_format]['ext']
-                
-                if os.path.exists(labels_dir) and labels_dir != self.input_dir:
-                    # 如果存在专门的标注目录，从该目录寻找标签文件
-                    annotation_filename = image_file.stem + annotation_ext
-                    annotation_path = os.path.join(labels_dir, annotation_filename)
+                # 根据格式类型确定标签文件路径
+                if self.format_type == 'labelme':
+                    # LabelMe格式：JSON文件在同一目录
+                    annotation_path = str(image_file.with_suffix('.json'))
+                elif self.format_type == 'xml':
+                    # XML格式：XML文件在同一目录
+                    annotation_path = str(image_file.with_suffix('.xml'))
                 else:
-                    # 否则在同目录下寻找标签文件
-                    annotation_path = str(image_file.with_suffix(annotation_ext))
+                    # YOLO格式：根据输入目录结构确定标签文件路径
+                    images_dir = os.path.join(self.input_dir, "images")
+                    labels_dir = os.path.join(self.input_dir, "labels")
+                    if os.path.exists(labels_dir):
+                        # 如果存在labels目录，从该目录寻找标签文件
+                        annotation_filename = image_file.stem + '.txt'
+                        annotation_path = os.path.join(labels_dir, annotation_filename)
+                    else:
+                        # 否则在同目录下寻找标签文件
+                        annotation_path = str(image_file.with_suffix('.txt'))
                 
                 # 检查是否有对应的标签文件
                 has_labels = os.path.exists(annotation_path)
@@ -611,7 +590,7 @@ class AugmentationWorker(QThread):
                 
                 success, result = self.augmenter.augment_image_and_labels(
                     image_path, annotation_path, aug_pipeline, 
-                    self.output_dir, self.multiplier, self.annotation_format
+                    self.output_dir, self.multiplier, self.format_type
                 )
                 
                 if success:
@@ -641,6 +620,7 @@ class AugmentationWorker(QThread):
             
             # 详细的完成信息
             result_message = f"""处理完成！
+格式类型: {self.format_type.upper()}
 原始图片: {total_files} 张
 成功处理: {processed_files} 张
 有标签文件: {files_with_labels} 张
@@ -658,8 +638,8 @@ class AugmentationWorker(QThread):
             self.error_occurred.emit(f"处理过程中出现错误: {str(e)}")
 
 
-class YOLOAugmenterGUI(QMainWindow):
-    """多格式数据增强GUI主界面 - 支持YOLO/LabelImg/LabelMe"""
+class DataAugmenterGUI(QMainWindow):
+    """数据增强GUI主界面，支持YOLO、LabelMe和XML格式"""
     
     def __init__(self):
         super().__init__()
@@ -667,8 +647,8 @@ class YOLOAugmenterGUI(QMainWindow):
         self.worker = None
         
     def init_ui(self):
-        self.setWindowTitle("多格式数据增强工具 - 支持YOLO/LabelImg/LabelMe")
-        self.setGeometry(100, 100, 950, 750)
+        self.setWindowTitle("数据增强工具 - 支持YOLO/LabelMe/XML格式")
+        self.setGeometry(100, 100, 900, 700)
         
         # 创建中央widget
         central_widget = QWidget()
@@ -728,50 +708,33 @@ class YOLOAugmenterGUI(QMainWindow):
         
         layout.addWidget(input_group)
         
-        # 标注格式选择
-        format_group = QGroupBox("标注格式")
-        format_layout = QVBoxLayout()
-        format_group.setLayout(format_layout)
+        # 格式和增强设置
+        settings_group = QGroupBox("增强设置")
+        settings_layout = QGridLayout()
+        settings_group.setLayout(settings_layout)
         
-        format_selection_layout = QHBoxLayout()
-        format_selection_layout.addWidget(QLabel("标注格式:"))
+        # 格式选择
+        settings_layout.addWidget(QLabel("数据格式:"), 0, 0)
         self.format_combo = QComboBox()
-        self.format_combo.addItem("自动检测", "auto")
-        self.format_combo.addItem("YOLO格式 (.txt)", "yolo")
-        self.format_combo.addItem("LabelImg XML格式 (.xml)", "labelimg")
-        self.format_combo.addItem("LabelMe JSON格式 (.json)", "labelme")
-        self.format_combo.setCurrentIndex(0)  # 默认自动检测
-        format_selection_layout.addWidget(self.format_combo)
-        format_selection_layout.addStretch()
-        format_layout.addLayout(format_selection_layout)
+        self.format_combo.addItems(["YOLO", "LabelMe", "XML"])
+        self.format_combo.currentTextChanged.connect(self.on_format_changed)
+        settings_layout.addWidget(self.format_combo, 0, 1)
         
-        # 格式说明
-        format_info = QLabel("""
-格式说明:
-• 自动检测: 自动识别输入目录中的标注格式
-• YOLO格式: 每行一个对象，格式为 "class_id x_center y_center width height"
-• LabelImg XML: Pascal VOC格式的XML标注文件
-• LabelMe JSON: LabelMe工具生成的JSON标注文件
-        """)
-        format_info.setStyleSheet("QLabel { color: #666; font-size: 11px; }")
-        format_layout.addWidget(format_info)
-        
-        layout.addWidget(format_group)
-        
-        # 增强倍数设置
-        multiplier_group = QGroupBox("增强设置")
-        multiplier_layout = QHBoxLayout()
-        multiplier_group.setLayout(multiplier_layout)
-        
-        multiplier_layout.addWidget(QLabel("增强倍数:"))
+        # 增强倍数
+        settings_layout.addWidget(QLabel("增强倍数:"), 1, 0)
         self.multiplier_spinbox = QSpinBox()
         self.multiplier_spinbox.setMinimum(1)
         self.multiplier_spinbox.setMaximum(20)
         self.multiplier_spinbox.setValue(3)
-        multiplier_layout.addWidget(self.multiplier_spinbox)
-        multiplier_layout.addStretch()
+        settings_layout.addWidget(self.multiplier_spinbox, 1, 1)
         
-        layout.addWidget(multiplier_group)
+        # 格式说明
+        self.format_info_label = QLabel("YOLO格式：支持images/labels目录结构或同目录下的图片和txt文件")
+        self.format_info_label.setStyleSheet("QLabel { color: #666; font-size: 11px; }")
+        self.format_info_label.setWordWrap(True)
+        settings_layout.addWidget(self.format_info_label, 2, 0, 1, 2)
+        
+        layout.addWidget(settings_group)
         
         # 控制按钮
         button_layout = QHBoxLayout()
@@ -788,6 +751,15 @@ class YOLOAugmenterGUI(QMainWindow):
         
         layout.addLayout(button_layout)
         layout.addStretch()
+    
+    def on_format_changed(self, format_text):
+        """格式选择变化时的处理"""
+        if format_text == "LabelMe":
+            self.format_info_label.setText("LabelMe格式：图片和JSON标注文件在同一目录下")
+        elif format_text == "XML":
+            self.format_info_label.setText("XML格式：图片和XML标注文件在同一目录下（LabelImg格式）")
+        else:
+            self.format_info_label.setText("YOLO格式：支持images/labels目录结构或同目录下的图片和txt文件")
         
     def setup_augmentation_tab(self, tab):
         """设置增强参数选项卡"""
@@ -1093,7 +1065,7 @@ class YOLOAugmenterGUI(QMainWindow):
         # 获取参数
         aug_params = self.get_augmentation_params()
         multiplier = self.multiplier_spinbox.value()
-        annotation_format = self.format_combo.currentData()
+        format_type = self.format_combo.currentText().lower()
         
         # 检查是否选择了至少一种增强方法
         if not any(aug_params.values()):
@@ -1104,94 +1076,12 @@ class YOLOAugmenterGUI(QMainWindow):
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         
-        # 清空日志和进度
-        self.log_text.clear()
-        self.progress_bar.setValue(0)
-        self.status_label.setText("正在初始化...")
-        self.stats_label.setText("统计信息将在处理时显示")
-        
-        # 创建并启动工作线程
-        self.worker = AugmentationWorker(input_dir, output_dir, aug_params, multiplier, annotation_format)
-        self.worker.progress_updated.connect(self.progress_bar.setValue)
-        self.worker.status_updated.connect(self.status_label.setText)
-        self.worker.finished.connect(self.on_augmentation_finished)
-        self.worker.error_occurred.connect(self.on_augmentation_error)
-        self.worker.stats_updated.connect(self.stats_label.setText)
-        self.worker.start()
-        
-        self.add_log(f"开始数据增强处理...")
-        self.add_log(f"输入目录: {input_dir}")
-        self.add_log(f"输出目录: {output_dir}")
-        self.add_log(f"标注格式: {self.format_combo.currentText()}")
-        self.add_log(f"增强倍数: {multiplier}")
-        
-    def stop_augmentation(self):
-        """停止数据增强"""
-        if self.worker and self.worker.isRunning():
-            self.worker.terminate()
-            self.worker.wait()
-            self.add_log("用户停止了处理过程")
-            self.status_label.setText("已停止")
-        
-        self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-    
-    def on_augmentation_finished(self, message):
-        """增强完成回调"""
-        self.add_log("=" * 50)
-        self.add_log(message)
-        self.add_log("=" * 50)
-        self.status_label.setText("处理完成")
-        
-        self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-        
-        QMessageBox.information(self, "完成", message)
-    
-    def on_augmentation_error(self, error_message):
-        """增强错误回调"""
-        self.add_log(f"错误: {error_message}")
-        self.status_label.setText("处理失败")
-        
-        self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-        
-        QMessageBox.critical(self, "错误", error_message)
-    
-    def add_log(self, message):
-        """添加日志"""
-        self.log_text.append(message)
-        # 自动滚动到底部
-        cursor = self.log_text.textCursor()
-        cursor.movePosition(cursor.End)
-        self.log_text.setTextCursor(cursor)
-
-
-def main():
-    """主函数"""
-    app = QApplication(sys.argv)
-    
-    # 设置应用程序信息
-    app.setApplicationName("多格式数据增强工具")
-    app.setApplicationVersion("2.0")
-    
-    # 创建主窗口
-    window = YOLOAugmenterGUI()
-    window.show()
-    
-    sys.exit(app.exec_())
-
-
-if __name__ == "__main__":
-    main()f.start_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-        
         # 清空日志
         self.log_text.clear()
         self.progress_bar.setValue(0)
         
         # 创建并启动工作线程
-        self.worker = AugmentationWorker(input_dir, output_dir, aug_params, multiplier)
+        self.worker = AugmentationWorker(input_dir, output_dir, aug_params, multiplier, format_type)
         self.worker.progress_updated.connect(self.progress_bar.setValue)
         self.worker.status_updated.connect(self.status_label.setText)
         self.worker.status_updated.connect(self.add_log)
@@ -1245,12 +1135,12 @@ if __name__ == "__main__":
 
 def main():
     app = QApplication(sys.argv)
-    app.setApplicationName("YOLO数据增强工具")
+    app.setApplicationName("数据增强工具")
     
     # 设置应用程序图标和样式
     app.setStyle('Fusion')
     
-    window = YOLOAugmenterGUI()
+    window = DataAugmenterGUI()
     window.show()
     
     sys.exit(app.exec_())
